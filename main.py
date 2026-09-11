@@ -226,6 +226,10 @@ async def process_callback_table_ua(callback: CallbackQuery, db_pool):
             parse_mode="Markdown",
             reply_markup=file_action_kb_ua
         )
+        if amount >= 100_000_000:
+            await message.answer("Сума занадто велика! Введіть значення менше 100 000 000.")
+            return
+            
     except Exception as e:
         print(f"❌ Помилка: {e}")
         await callback.message.answer("Не вдалося сформувати Excel-табличку.")
