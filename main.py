@@ -1,8 +1,11 @@
 import asyncio
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import os
-from aiogram import Bot, Dispatcher, F, types
+import threading
+
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,33 +18,55 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    TelegramObject,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from dotenv import load_dotenv
 import asyncpg
+from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject
 
+# --- ЗАВАНТАЖЕННЯ ЗМІННИХ ---
 evn_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=evn_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Встав сюди ID людей, яких треба забанити
-BANNED_USERS = os.getenv("BANNED_USERS")  # замініть на потрібний ID
-
-class BlockMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event: TelegramObject, data):
-        user = data.get("event_from_user")
-        if user and user.id in BANNED_USERS:
-            return  # Мовчки ігноруємо
-        return await handler(event, data)
+BANNED_USERS = [123456789, 987654321]  # Вкажи сюди реальні Telegram ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+
+# --- ФЕЙКОВИЙ ВЕБ-СЕРВЕР ДЛЯ RENDER (БЕЗ AIOHTTP) ---
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.end_headers()
+    self.wfile.write(b"OK")
+
+  def log_message(self, format, *args):
+    return  # Вимикаємо логування HTTP-запитів
+
+
+def run_dummy_server():
+  port = int(os.getenv("PORT", 10000))
+  server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+  print(f"🌐 Fake Web Server running on port {port}")
+  server.serve_forever()
+
+
+# --- MIDDLEWARE ДЛЯ БЛОКУВАННЯ ---
+class BlockMiddleware(BaseMiddleware):
+
+  async def __call__(self, handler, event: TelegramObject, data):
+    user = data.get("event_from_user")
+    if user and user.id in BANNED_USERS:
+      return  # Ігноруємо користувача повністю
+    return await handler(event, data)
+
 
 # --- КЛАВІАТУРИ ТА ЛОКАЛІЗАЦІЯ ---
 inline_kb_builder = InlineKeyboardBuilder()
@@ -175,8 +200,8 @@ class FinanceForm(StatesGroup):
   waiting_for_confirmation = State()
 
 
-# --- СТВОРЕННЯ EXCEL ---
-async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
+# --- ГЕНЕРАЦІЯ EXCEL ---
+async def generate_excel_and_stats(user_id: int, db_pool, lang: str = "ua"):
   async with db_pool.acquire() as conn:
     rows = await conn.fetch(
         """
@@ -194,8 +219,8 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
   max_expense = 0.0
   max_income = 0.0
   for row in rows:
-    amt = float(row['amount'])
-    if row['is_income']:
+    amt = float(row["amount"])
+    if row["is_income"]:
       if amt > max_income:
         max_income = amt
     else:
@@ -206,11 +231,11 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
   ws = wb.active
   ws.title = "Finance" if lang == "en" else "Фінанси"
 
-  if lang == "en":
-    headers = ["Date", "Comment", "Expenses", "Income", "Balance +/-"]
-  else:
-    headers = ["Дата ", "Коментар", "витрати", "доходи", "В + чи -"]
-
+  headers = (
+      ["Date", "Comment", "Expenses", "Income", "Balance +/-"]
+      if lang == "en"
+      else ["Дата ", "Коментар", "витрати", "доходи", "В + чи -"]
+  )
   ws.append(headers)
 
   header_fill = PatternFill(
@@ -223,16 +248,16 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
     cell.alignment = Alignment(horizontal="center")
 
   for row in rows:
-    created_dt = row['created_at']
-    if isinstance(created_dt, datetime):
-      date_str = created_dt.strftime("%d.%m.%Y %H:%M")
-    else:
-      date_str = str(created_dt)
+    created_dt = row["created_at"]
+    date_str = (
+        created_dt.strftime("%d.%m.%Y %H:%M")
+        if isinstance(created_dt, datetime)
+        else str(created_dt)
+    )
+    comment = row["comment"] or ""
+    amount = float(row["amount"])
 
-    comment = row['comment'] or ""
-    amount = float(row['amount'])
-
-    if row['is_income']:
+    if row["is_income"]:
       expense_val = 0
       income_val = amount
       emoji_balance = f"🟢 🔼 +{amount:.2f}"
@@ -244,7 +269,7 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
     ws.append([date_str, comment, expense_val, income_val, emoji_balance])
 
   for col in ws.columns:
-    max_len = max(len(str(cell.value or '')) for cell in col)
+    max_len = max(len(str(cell.value or "")) for cell in col)
     col_letter = col[0].column_letter
     ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
 
@@ -252,7 +277,7 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
   wb.save(file_stream)
   file_stream.seek(0)
 
-  if lang == 'en':
+  if lang == "en":
     stats_text = (
         "📊 Your financial statistics for the last 6 months:\n\n"
         f"🟢 Highest income: {max_income:.2f} UAH\n"
@@ -276,7 +301,7 @@ async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
 # --- ХЕНДЛЕРИ ---
 @dp.message(F.text == "Переглянути табличку витрат та доходів")
 @dp.message(F.text == "Check the income and expense table")
-@dp.message(F.text == "/table")
+@dp.message(Command("table"))
 async def cmd_table(message: types.Message, state: FSMContext, db_pool):
   data = await state.get_data()
   lang = data.get("lang", "ua")
@@ -350,19 +375,16 @@ async def process_request_clear(callback: CallbackQuery, state: FSMContext):
   data = await state.get_data()
   lang = data.get("lang", "ua")
 
-  if lang == "en":
-    text = (
-        "⚠️ WARNING! Are you sure you want to completely clear the history and"
-        " start a new table?\nAll current records will be deleted!"
-    )
-    kb = clear_confirm_kb_en
-  else:
-    text = (
-        "⚠️ УВАГА! Ви впевнені, що хочете повністю очистити історію та почати"
-        " нову таблицю?\nУсі поточні записи буде видалено!"
-    )
-    kb = clear_confirm_kb_ua
-
+  text = (
+      "⚠️ WARNING! Are you sure you want to completely clear the history and"
+      " start a new table?\nAll current records will be deleted!"
+      if lang == "en"
+      else (
+          "⚠️ УВАГА! Ви впевнені, що хочете повністю очистити історію та почати"
+          " нову таблицю?\nУсі поточні записи буде видалено!"
+      )
+  )
+  kb = clear_confirm_kb_en if lang == "en" else clear_confirm_kb_ua
   await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 
@@ -475,14 +497,13 @@ async def process_settings_button(message: Message, state: FSMContext):
     lang = "en"
 
   await state.set_state(FinanceForm.in_settings)
-  if lang == "en":
-    await message.answer(
-        "⚙️ You selected settings!", reply_markup=inline_kb_en.as_markup()
-    )
-  else:
-    await message.answer(
-        "⚙️ Ви обрали налаштування!", reply_markup=inline_kb_ua.as_markup()
-    )
+  msg_text = (
+      "⚙️ You selected settings!"
+      if lang == "en"
+      else "⚙️ Ви обрали налаштування!"
+  )
+  kb = inline_kb_en if lang == "en" else inline_kb_ua
+  await message.answer(msg_text, reply_markup=kb.as_markup())
 
 
 @dp.message(F.text.contains("Додати витрати") | F.text.contains("Add Expense"))
@@ -528,7 +549,6 @@ async def filter_expense(message: Message, state: FSMContext):
       await message.answer(msg)
       return
 
-    # Захист від переповнення NUMERIC
     if expense_amount >= 100_000_000:
       msg = (
           "Amount is too large! Please enter a value under 100,000,000."
@@ -568,19 +588,16 @@ async def filter_expense_comment(message: Message, state: FSMContext):
   lang = data.get("lang", "ua")
 
   await state.set_state(FinanceForm.waiting_for_confirmation)
-  if lang == "en":
-    text = (
-        f"You entered expense amount: {expense_amount} UAH.\nComment:"
-        f" '{comment}'.\nDo you want to confirm or cancel?"
-    )
-    kb = comfirm_kb_en
-  else:
-    text = (
-        f"Ви ввели суму витрат: {expense_amount} грн.\nКоментар:"
-        f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
-    )
-    kb = comfirm_kb_ua
-
+  text = (
+      f"You entered expense amount: {expense_amount} UAH.\nComment:"
+      f" '{comment}'.\nDo you want to confirm or cancel?"
+      if lang == "en"
+      else (
+          f"Ви ввели суму витрат: {expense_amount} грн.\nКоментар:"
+          f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
+      )
+  )
+  kb = comfirm_kb_en if lang == "en" else comfirm_kb_ua
   await message.answer(text, reply_markup=kb)
 
 
@@ -599,7 +616,6 @@ async def filter_income(message: Message, state: FSMContext):
       await message.answer(msg)
       return
 
-    # Захист від переповнення NUMERIC
     if income_amount >= 100_000_000:
       msg = (
           "Amount is too large! Please enter a value under 100,000,000."
@@ -639,19 +655,16 @@ async def filter_income_comment(message: Message, state: FSMContext):
   lang = data.get("lang", "ua")
 
   await state.set_state(FinanceForm.waiting_for_confirmation)
-  if lang == "en":
-    text = (
-        f"You entered income amount: {income_amount} UAH.\nComment:"
-        f" '{comment}'.\nDo you want to confirm or cancel?"
-    )
-    kb = comfirm_kb_en
-  else:
-    text = (
-        f"Ви ввели суму доходу: {income_amount} грн.\nКоментар:"
-        f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
-    )
-    kb = comfirm_kb_ua
-
+  text = (
+      f"You entered income amount: {income_amount} UAH.\nComment:"
+      f" '{comment}'.\nDo you want to confirm or cancel?"
+      if lang == "en"
+      else (
+          f"Ви ввели суму доходу: {income_amount} грн.\nКоментар:"
+          f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
+      )
+  )
+  kb = comfirm_kb_en if lang == "en" else comfirm_kb_ua
   await message.answer(text, reply_markup=kb)
 
 
@@ -731,15 +744,19 @@ async def get_db_pool():
 
 
 async def main():
-    db_pool = await get_db_pool()
-    dp.workflow_data["db_pool"] = db_pool
+  db_pool = await get_db_pool()
+  dp.workflow_data["db_pool"] = db_pool
 
-    dp.message.outer_middleware(BlockMiddleware())
-    dp.callback_query.outer_middleware(BlockMiddleware())
+  # Фейковий сервер портів у окремому потоці (для Render Free Service)
+  threading.Thread(target=run_dummy_server, daemon=True).start()
 
-    asyncio.create_task(start_dummy_server())
-    await dp.start_polling(bot)
-    
+  # Захист від заблокованих ID
+  dp.message.outer_middleware(BlockMiddleware())
+  dp.callback_query.outer_middleware(BlockMiddleware())
+
+  await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
   try:
     print("Бот запускається...")
