@@ -1,9 +1,13 @@
 import asyncio
-from aiogram import Bot, Dispatcher, F, Router, types
+from datetime import datetime
+import io
+import os
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -11,16 +15,12 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
-from datetime import datetime
-import os
 import asyncpg
-import io
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 
 evn_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=evn_path)
@@ -31,18 +31,37 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- КЛАВІАТУРИ ---
+# --- КЛАВІАТУРИ ТА ЛОКАЛІЗАЦІЯ ---
 inline_kb_builder = InlineKeyboardBuilder()
-inline_kb_builder.row(InlineKeyboardButton(text="Українська мова 🇺🇦", callback_data="lang_ua"))
-inline_kb_builder.row(InlineKeyboardButton(text="English language 🇬🇧", callback_data="lang_en"))
+inline_kb_builder.row(
+    InlineKeyboardButton(text="Українська мова 🇺🇦", callback_data="lang_ua")
+)
+inline_kb_builder.row(
+    InlineKeyboardButton(
+        text="English language 🇬🇧", callback_data="lang_en"
+    )
+)
 
 inline_kb_ua = InlineKeyboardBuilder()
-inline_kb_ua.row(InlineKeyboardButton(text="Переглянути табличку витрат та доходів", callback_data="view_table_ua"))
-inline_kb_ua.row(InlineKeyboardButton(text="Оберіть мову", callback_data="saints_ua"))
+inline_kb_ua.row(
+    InlineKeyboardButton(
+        text="Переглянути табличку витрат та доходів",
+        callback_data="view_table_ua",
+    )
+)
+inline_kb_ua.row(
+    InlineKeyboardButton(text="Оберіть мову", callback_data="saints_ua")
+)
 
 inline_kb_en = InlineKeyboardBuilder()
-inline_kb_en.row(InlineKeyboardButton(text="Check the income and expense table", callback_data="view_table_en"))
-inline_kb_en.row(InlineKeyboardButton(text="Choose a language", callback_data="saints_en"))
+inline_kb_en.row(
+    InlineKeyboardButton(
+        text="Check the income and expense table", callback_data="view_table_en"
+    )
+)
+inline_kb_en.row(
+    InlineKeyboardButton(text="Choose a language", callback_data="saints_en")
+)
 
 menu_uk = ReplyKeyboardMarkup(
     keyboard=[
@@ -91,7 +110,19 @@ comfirm_kb_en = InlineKeyboardMarkup(
 file_action_kb_ua = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(text="Очистити історію 🗑️", callback_data="request_clear_all")
+            InlineKeyboardButton(
+                text="Очистити історію 🗑️", callback_data="request_clear_all"
+            )
+        ]
+    ]
+)
+
+file_action_kb_en = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Clear history 🗑️", callback_data="request_clear_all"
+            )
         ]
     ]
 )
@@ -99,88 +130,124 @@ file_action_kb_ua = InlineKeyboardMarkup(
 clear_confirm_kb_ua = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Так, очистити все", callback_data="confirm_clear_all"),
-            InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_clear"),
+            InlineKeyboardButton(
+                text="✅ Так, очистити все", callback_data="confirm_clear_all"
+            ),
+            InlineKeyboardButton(
+                text="❌ Скасувати", callback_data="cancel_clear"
+            ),
         ]
     ]
 )
 
+clear_confirm_kb_en = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Yes, clear all", callback_data="confirm_clear_all"
+            ),
+            InlineKeyboardButton(
+                text="❌ Cancel", callback_data="cancel_clear"
+            ),
+        ]
+    ]
+)
+
+
 class FinanceForm(StatesGroup):
-    waiting_for_expense = State()
-    waiting_for_expense_comment = State()
-    waiting_for_income = State()
-    waiting_for_income_comment = State()
-    in_settings = State()
-    waiting_for_confirmation = State()
+  waiting_for_expense = State()
+  waiting_for_expense_comment = State()
+  waiting_for_income = State()
+  waiting_for_income_comment = State()
+  in_settings = State()
+  waiting_for_confirmation = State()
+
 
 # --- СТВОРЕННЯ EXCEL ---
-async def generate_excel_and_stats(user_id: int, db_pool):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
+async def generate_excel_and_stats(user_id: int, db_pool, lang: str = 'ua'):
+  async with db_pool.acquire() as conn:
+    rows = await conn.fetch(
+        """
             SELECT amount, is_income, comment, created_at 
             FROM operations 
             WHERE user_id = $1 AND created_at >= CURRENT_DATE - INTERVAL '180 days'
             ORDER BY created_at ASC;
-        """, user_id)
-    
-    if not rows:
-        return None, None
+        """,
+        user_id,
+    )
 
-    max_expense = 0.0
-    max_income = 0.0
-    for row in rows:
-        amt = float(row['amount'])
-        if row['is_income']:
-            if amt > max_income:
-                max_income = amt
-        else:
-            if amt > max_expense:
-                max_expense = amt
+  if not rows:
+    return None, None
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Фінанси"
+  max_expense = 0.0
+  max_income = 0.0
+  for row in rows:
+    amt = float(row['amount'])
+    if row['is_income']:
+      if amt > max_income:
+        max_income = amt
+    else:
+      if amt > max_expense:
+        max_expense = amt
 
+  wb = Workbook()
+  ws = wb.active
+  ws.title = "Finance" if lang == "en" else "Фінанси"
+
+  if lang == "en":
+    headers = ["Date", "Comment", "Expenses", "Income", "Balance +/-"]
+  else:
     headers = ["Дата ", "Коментар", "витрати", "доходи", "В + чи -"]
-    ws.append(headers)
 
-    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
+  ws.append(headers)
 
-    for row in rows:
-        created_dt = row['created_at']
-        if isinstance(created_dt, datetime):
-            date_str = created_dt.strftime("%d.%m.%Y %H:%M")
-        else:
-            date_str = str(created_dt)
+  header_fill = PatternFill(
+      start_color="1F4E79", end_color="1F4E79", fill_type="solid"
+  )
+  header_font = Font(color="FFFFFF", bold=True)
+  for cell in ws[1]:
+    cell.fill = header_fill
+    cell.font = header_font
+    cell.alignment = Alignment(horizontal="center")
 
-        comment = row['comment'] or ""
-        amount = float(row['amount'])
-        
-        if row['is_income']:
-            expense_val = 0
-            income_val = amount
-            emoji_balance = f"🟢 🔼 +{amount:.2f}"
-        else:
-            expense_val = amount
-            income_val = 0
-            emoji_balance = f"🔴 🔽 -{amount:.2f}"
-            
-        ws.append([date_str, comment, expense_val, income_val, emoji_balance])
+  for row in rows:
+    created_dt = row['created_at']
+    if isinstance(created_dt, datetime):
+      date_str = created_dt.strftime("%d.%m.%Y %H:%M")
+    else:
+      date_str = str(created_dt)
 
-    for col in ws.columns:
-        max_len = max(len(str(cell.value or '')) for cell in col)
-        col_letter = col[0].column_letter
-        ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
+    comment = row['comment'] or ""
+    amount = float(row['amount'])
 
-    file_stream = io.BytesIO()
-    wb.save(file_stream)
-    file_stream.seek(0)
+    if row['is_income']:
+      expense_val = 0
+      income_val = amount
+      emoji_balance = f"🟢 🔼 +{amount:.2f}"
+    else:
+      expense_val = amount
+      income_val = 0
+      emoji_balance = f"🔴 🔽 -{amount:.2f}"
 
+    ws.append([date_str, comment, expense_val, income_val, emoji_balance])
+
+  for col in ws.columns:
+    max_len = max(len(str(cell.value or '')) for cell in col)
+    col_letter = col[0].column_letter
+    ws.column_dimensions[col_letter].width = max(max_len + 3, 14)
+
+  file_stream = io.BytesIO()
+  wb.save(file_stream)
+  file_stream.seek(0)
+
+  if lang == 'en':
+    stats_text = (
+        "📊 Your financial statistics for the last 6 months:\n\n"
+        f"🟢 Highest income: {max_income:.2f} UAH\n"
+        f"🔴 Highest expense: {max_expense:.2f} UAH\n\n"
+        "📁 Full report in the attached Excel file below:"
+    )
+  else:
     stats_text = (
         "📊 Твоя фінансова статистика за пів року:\n\n"
         f"🟢 Найбільший дохід: {max_income:.2f} грн\n"
@@ -188,211 +255,478 @@ async def generate_excel_and_stats(user_id: int, db_pool):
         "📁 Повний звіт у прикріпленому Excel-файлі нижче:"
     )
 
-    excel_file = BufferedInputFile(file_stream.read(), filename="finance_report_6m.xlsx")
-    return excel_file, stats_text
+  excel_file = BufferedInputFile(
+      file_stream.read(), filename="finance_report_6m.xlsx"
+  )
+  return excel_file, stats_text
+
 
 # --- ХЕНДЛЕРИ ---
 @dp.message(F.text == "Переглянути табличку витрат та доходів")
+@dp.message(F.text == "Check the income and expense table")
 @dp.message(F.text == "/table")
-async def cmd_table(message: types.Message, db_pool):
-    try:
-        excel_file, stats_text = await generate_excel_and_stats(message.from_user.id, db_pool)
-        if not excel_file:
-            await message.answer("📊 У тебе поки немає збережених записів за останні 6 місяців.")
-            return
+async def cmd_table(message: types.Message, state: FSMContext, db_pool):
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+  try:
+    excel_file, stats_text = await generate_excel_and_stats(
+        message.from_user.id, db_pool, lang
+    )
+    if not excel_file:
+      err_msg = (
+          "📊 You don't have any saved records for the last 6 months yet."
+          if lang == "en"
+          else "📊 У тебе поки немає збережених записів за останні 6 місяців."
+      )
+      await message.answer(err_msg)
+      return
 
-        await message.answer_document(
-            document=excel_file,
-            caption=stats_text,
-            parse_mode="Markdown",
-            reply_markup=file_action_kb_ua
-        )
-    except Exception as e:
-        print(f"❌ Помилка: {e}")
-        await message.answer("Не вдалося сформувати Excel-табличку.")
+    kb = file_action_kb_en if lang == "en" else file_action_kb_ua
+    await message.answer_document(
+        document=excel_file,
+        caption=stats_text,
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+  except Exception as e:
+    print(f"❌ Помилка: {e}")
+    await message.answer(
+        "Failed to generate Excel file."
+        if lang == "en"
+        else "Не вдалося сформувати Excel-табличку."
+    )
 
-@dp.callback_query(F.data == "view_table_ua")
-async def process_callback_table_ua(callback: CallbackQuery, db_pool):
-    await callback.answer()
-    try:
-        excel_file, stats_text = await generate_excel_and_stats(callback.from_user.id, db_pool)
-        if not excel_file:
-            await callback.message.answer("📊 У тебе поки немає збережених записів за останні 6 місяців.")
-            return
-        
-        await callback.message.answer_document(
-            document=excel_file, 
-            caption=stats_text, 
-            parse_mode="Markdown",
-            reply_markup=file_action_kb_ua
-        )
-        if amount >= 100_000_000:
-            await message.answer("Сума занадто велика! Введіть значення менше 100 000 000.")
-            return
-            
-    except Exception as e:
-        print(f"❌ Помилка: {e}")
-        await callback.message.answer("Не вдалося сформувати Excel-табличку.")
+
+@dp.callback_query(F.data.in_(["view_table_ua", "view_table_en"]))
+async def process_callback_table(callback: CallbackQuery, state: FSMContext, db_pool):
+  await callback.answer()
+  lang = "en" if callback.data == "view_table_en" else "ua"
+  await state.update_data(lang=lang)
+
+  try:
+    excel_file, stats_text = await generate_excel_and_stats(
+        callback.from_user.id, db_pool, lang
+    )
+    if not excel_file:
+      err_msg = (
+          "📊 You don't have any saved records for the last 6 months yet."
+          if lang == "en"
+          else "📊 У тебе поки немає збережених записів за останні 6 місяців."
+      )
+      await callback.message.answer(err_msg)
+      return
+
+    kb = file_action_kb_en if lang == "en" else file_action_kb_ua
+    await callback.message.answer_document(
+        document=excel_file,
+        caption=stats_text,
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+  except Exception as e:
+    print(f"❌ Помилка: {e}")
+    await callback.message.answer(
+        "Failed to generate Excel file."
+        if lang == "en"
+        else "Не вдалося сформувати Excel-табличку."
+    )
+
 
 @dp.callback_query(F.data == "request_clear_all")
-async def process_request_clear(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
-        "⚠️ УВАГА! Ви впевнені, що хочете повністю очистити історію та почати нову таблицю?\n"
-        "Усі поточні записи буде видалено!",
-        reply_markup=clear_confirm_kb_ua,
-        parse_mode="Markdown"
+async def process_request_clear(callback: CallbackQuery, state: FSMContext):
+  await callback.answer()
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+
+  if lang == "en":
+    text = (
+        "⚠️ WARNING! Are you sure you want to completely clear the history and"
+        " start a new table?\nAll current records will be deleted!"
     )
+    kb = clear_confirm_kb_en
+  else:
+    text = (
+        "⚠️ УВАГА! Ви впевнені, що хочете повністю очистити історію та почати"
+        " нову таблицю?\nУсі поточні записи буде видалено!"
+    )
+    kb = clear_confirm_kb_ua
+
+  await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+
 @dp.callback_query(F.data == "confirm_clear_all")
-async def process_confirm_clear(callback: CallbackQuery, db_pool):
-    await callback.answer()
-    user_id = callback.from_user.id
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute("DELETE FROM operations WHERE user_id = $1;", user_id)
-        await callback.message.edit_text("✨ Історію успішно очищено! Наступна табличка формуватиметься з чистого аркуша.")
-    except Exception as e:
-        print(f"❌ Помилка очищення: {e}")
-        await callback.message.edit_text("Не вдалося очистити історію.")
+async def process_confirm_clear(
+    callback: CallbackQuery, state: FSMContext, db_pool
+):
+  await callback.answer()
+  user_id = callback.from_user.id
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+
+  try:
+    async with db_pool.acquire() as conn:
+      await conn.execute(
+          "DELETE FROM operations WHERE user_id = $1;", user_id
+      )
+
+    msg = (
+        "✨ History successfully cleared! The next table will start from"
+        " scratch."
+        if lang == "en"
+        else (
+            "✨ Історію успішно очищено! Наступна табличка формуватиметься з"
+            " чистого аркуша."
+        )
+    )
+    await callback.message.edit_text(msg)
+  except Exception as e:
+    print(f"❌ Помилка очищення: {e}")
+    err = (
+        "Failed to clear history."
+        if lang == "en"
+        else "Не вдалося очистити історію."
+    )
+    await callback.message.edit_text(err)
+
 
 @dp.callback_query(F.data == "cancel_clear")
-async def process_cancel_clear(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.edit_text("Очищення скасовано. Ваші дані збережені 👍")
+async def process_cancel_clear(callback: CallbackQuery, state: FSMContext):
+  await callback.answer()
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+
+  msg = (
+      "Clearing cancelled. Your data is safe 👍"
+      if lang == "en"
+      else "Очищення скасовано. Ваші дані збережені 👍"
+  )
+  await callback.message.edit_text(msg)
+
 
 @dp.callback_query(F.data == "lang_ua")
-async def set_ukrainian(callback: CallbackQuery):
-    await callback.message.edit_text("Вибрано Українську мову 🇺🇦")
-    await callback.message.answer('Привіт ! Я Бот для обліку фінансів 💰', reply_markup=menu_uk)
+async def set_ukrainian(callback: CallbackQuery, state: FSMContext):
+  await state.update_data(lang="ua")
+  await callback.message.edit_text("Вибрано Українську мову 🇺🇦")
+  await callback.message.answer(
+      "Привіт ! Я Бот для обліку фінансів 💰", reply_markup=menu_uk
+  )
+
 
 @dp.callback_query(F.data == "lang_en")
-async def set_english(callback: CallbackQuery):
-    await callback.message.edit_text("English language selected 🇬🇧")
-    await callback.message.answer('Hello! I\'m your finances tracking bot 💰', reply_markup=menu_en)
+async def set_english(callback: CallbackQuery, state: FSMContext):
+  await state.update_data(lang="en")
+  await callback.message.edit_text("English language selected 🇬🇧")
+  await callback.message.answer(
+      "Hello! I'm your finances tracking bot 💰", reply_markup=menu_en
+  )
+
+
+@dp.callback_query(F.data == "saints_ua")
+async def set_ukrainian_saints(callback: CallbackQuery):
+  await callback.message.edit_text(
+      "Вибери мову:", reply_markup=inline_kb_builder.as_markup()
+  )
+
+
+@dp.callback_query(F.data == "saints_en")
+async def set_english_saints(callback: CallbackQuery):
+  await callback.message.edit_text(
+      "Select language:", reply_markup=inline_kb_builder.as_markup()
+  )
+
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
-    await state.clear()
-    remove_keyboard = await message.answer("...", reply_markup=ReplyKeyboardRemove())
-    await remove_keyboard.delete()
-    await message.answer("🌐 Оберіть мову / 🌐 Choose a language :", reply_markup=inline_kb_builder.as_markup())
+  await state.clear()
+  remove_keyboard = await message.answer("...", reply_markup=ReplyKeyboardRemove())
+  await remove_keyboard.delete()
+  await message.answer(
+      "🌐 Оберіть мову / 🌐 Choose a language :",
+      reply_markup=inline_kb_builder.as_markup(),
+  )
+
+
+@dp.message(Command("language"))
+async def language_cmd(message: Message):
+  await message.answer(
+      "🌐 Змінити мову / 🌐 Swap a language:",
+      reply_markup=inline_kb_builder.as_markup(),
+  )
+
 
 @dp.message(Command("settings"))
 @dp.message(F.text.contains("Налаштування ⚙️") | F.text.contains("Settings ⚙️"))
 async def process_settings_button(message: Message, state: FSMContext):
-    await state.set_state(FinanceForm.in_settings)
-    await message.answer("⚙️ Ви обрали налаштування!", reply_markup=inline_kb_ua.as_markup())
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+  if message.text and "Settings" in message.text:
+    lang = "en"
+
+  await state.set_state(FinanceForm.in_settings)
+  if lang == "en":
+    await message.answer(
+        "⚙️ You selected settings!", reply_markup=inline_kb_en.as_markup()
+    )
+  else:
+    await message.answer(
+        "⚙️ Ви обрали налаштування!", reply_markup=inline_kb_ua.as_markup()
+    )
+
 
 @dp.message(F.text.contains("Додати витрати") | F.text.contains("Add Expense"))
 async def process_expense(message: Message, state: FSMContext):
-    await state.set_state(FinanceForm.waiting_for_expense)
-    await message.answer("Введіть суму витрат 💸")
+  data = await state.get_data()
+  lang = "en" if "Add Expense" in message.text else data.get("lang", "ua")
+  await state.update_data(lang=lang)
+
+  await state.set_state(FinanceForm.waiting_for_expense)
+  await message.answer(
+      "Enter the expense amount 💸"
+      if lang == "en"
+      else "Введіть суму витрат 💸"
+  )
+
 
 @dp.message(F.text.contains("Додати дохід") | F.text.contains("Add Income"))
 async def process_income(message: Message, state: FSMContext):
-    await state.set_state(FinanceForm.waiting_for_income)
-    await message.answer("Введіть суму доходу 💵")
+  data = await state.get_data()
+  lang = "en" if "Add Income" in message.text else data.get("lang", "ua")
+  await state.update_data(lang=lang)
+
+  await state.set_state(FinanceForm.waiting_for_income)
+  await message.answer(
+      "Enter the income amount 💵"
+      if lang == "en"
+      else "Введіть суму доходу 💵"
+  )
+
 
 @dp.message(FinanceForm.waiting_for_expense)
 async def filter_expense(message: Message, state: FSMContext):
-    try:
-        expense_amount = float(message.text.replace(',', '.'))
-        if expense_amount <= 0:
-            await message.answer("Введіть коректну суму витрат більше 0 💸")
-            return
-        await state.update_data(expense_amount=expense_amount)
-        await state.set_state(FinanceForm.waiting_for_expense_comment)
-        await message.answer("Введіть коментар до витрати (або відправте '-', якщо без коментаря) 📝:")
-    except (TypeError, ValueError):
-        await message.answer("Введіть коректну суму витрат 💸")
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+  try:
+    expense_amount = float(message.text.replace(",", "."))
+    if expense_amount <= 0:
+      msg = (
+          "Enter a valid expense amount greater than 0 💸"
+          if lang == "en"
+          else "Введіть коректну суму витрат більше 0 💸"
+      )
+      await message.answer(msg)
+      return
+
+    # Захист від переповнення NUMERIC
+    if expense_amount >= 100_000_000:
+      msg = (
+          "Amount is too large! Please enter a value under 100,000,000."
+          if lang == "en"
+          else "Сума занадто велика! Введіть значення менше 100 000 000."
+      )
+      await message.answer(msg)
+      return
+
+    await state.update_data(expense_amount=expense_amount)
+    await state.set_state(FinanceForm.waiting_for_expense_comment)
+
+    msg = (
+        "Enter a comment for the expense (or send '-' if no comment) 📝:"
+        if lang == "en"
+        else (
+            "Введіть коментар до витрати (або відправте '-', якщо без"
+            " коментаря) 📝:"
+        )
+    )
+    await message.answer(msg)
+  except (TypeError, ValueError):
+    msg = (
+        "Enter a valid expense amount 💸"
+        if lang == "en"
+        else "Введіть коректну суму витрат 💸"
+    )
+    await message.answer(msg)
+
 
 @dp.message(FinanceForm.waiting_for_expense_comment)
 async def filter_expense_comment(message: Message, state: FSMContext):
-    comment = "" if message.text.strip() == "-" else message.text.strip()
-    await state.update_data(expense_comment=comment)
-    data = await state.get_data()
-    expense_amount = data.get("expense_amount")
-    await state.set_state(FinanceForm.waiting_for_confirmation)
-    await message.answer(
-        f"Ви ввели суму витрат: {expense_amount} грн.\nКоментар: '{comment}'.\nБажаєте підтвердити чи скасувати?",
-        reply_markup=comfirm_kb_ua
+  comment = "" if message.text.strip() == "-" else message.text.strip()
+  await state.update_data(expense_comment=comment)
+  data = await state.get_data()
+  expense_amount = data.get("expense_amount")
+  lang = data.get("lang", "ua")
+
+  await state.set_state(FinanceForm.waiting_for_confirmation)
+  if lang == "en":
+    text = (
+        f"You entered expense amount: {expense_amount} UAH.\nComment:"
+        f" '{comment}'.\nDo you want to confirm or cancel?"
     )
+    kb = comfirm_kb_en
+  else:
+    text = (
+        f"Ви ввели суму витрат: {expense_amount} грн.\nКоментар:"
+        f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
+    )
+    kb = comfirm_kb_ua
+
+  await message.answer(text, reply_markup=kb)
+
 
 @dp.message(FinanceForm.waiting_for_income)
 async def filter_income(message: Message, state: FSMContext):
-    try:
-        income_amount = float(message.text.replace(',', '.'))
-        if income_amount <= 0:
-            await message.answer("Введіть коректну суму доходу більше 0 💵")
-            return
-        await state.update_data(income_amount=income_amount)
-        await state.set_state(FinanceForm.waiting_for_income_comment)
-        await message.answer("Введіть коментар до доходу (або відправте '-', якщо без коментаря) 📝:")
-    except (TypeError, ValueError):
-        await message.answer("Введіть коректну суму доходу 💵")
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+  try:
+    income_amount = float(message.text.replace(",", "."))
+    if income_amount <= 0:
+      msg = (
+          "Enter a valid income amount greater than 0 💵"
+          if lang == "en"
+          else "Введіть коректну суму доходу більше 0 💵"
+      )
+      await message.answer(msg)
+      return
+
+    # Захист від переповнення NUMERIC
+    if income_amount >= 100_000_000:
+      msg = (
+          "Amount is too large! Please enter a value under 100,000,000."
+          if lang == "en"
+          else "Сума занадто велика! Введіть значення менше 100 000 000."
+      )
+      await message.answer(msg)
+      return
+
+    await state.update_data(income_amount=income_amount)
+    await state.set_state(FinanceForm.waiting_for_income_comment)
+
+    msg = (
+        "Enter a comment for the income (or send '-' if no comment) 📝:"
+        if lang == "en"
+        else (
+            "Введіть коментар до доходу (або відправте '-', якщо без"
+            " коментаря) 📝:"
+        )
+    )
+    await message.answer(msg)
+  except (TypeError, ValueError):
+    msg = (
+        "Enter a valid income amount 💵"
+        if lang == "en"
+        else "Введіть коректну суму доходу 💵"
+    )
+    await message.answer(msg)
+
 
 @dp.message(FinanceForm.waiting_for_income_comment)
 async def filter_income_comment(message: Message, state: FSMContext):
-    comment = "" if message.text.strip() == "-" else message.text.strip()
-    await state.update_data(income_comment=comment)
-    data = await state.get_data()
-    income_amount = data.get("income_amount")
-    await state.set_state(FinanceForm.waiting_for_confirmation)
-    await message.answer(
-        f"Ви ввели суму доходу: {income_amount} грн.\nКоментар: '{comment}'.\nБажаєте підтвердити чи скасувати?",
-        reply_markup=comfirm_kb_ua
+  comment = "" if message.text.strip() == "-" else message.text.strip()
+  await state.update_data(income_comment=comment)
+  data = await state.get_data()
+  income_amount = data.get("income_amount")
+  lang = data.get("lang", "ua")
+
+  await state.set_state(FinanceForm.waiting_for_confirmation)
+  if lang == "en":
+    text = (
+        f"You entered income amount: {income_amount} UAH.\nComment:"
+        f" '{comment}'.\nDo you want to confirm or cancel?"
     )
+    kb = comfirm_kb_en
+  else:
+    text = (
+        f"Ви ввели суму доходу: {income_amount} грн.\nКоментар:"
+        f" '{comment}'.\nБажаєте підтвердити чи скасувати?"
+    )
+    kb = comfirm_kb_ua
+
+  await message.answer(text, reply_markup=kb)
+
 
 @dp.callback_query(FinanceForm.waiting_for_confirmation, F.data == "confirm")
-async def process_confirm_amount(callback: CallbackQuery, state: FSMContext, db_pool):
-    await callback.answer()
-    data = await state.get_data()
-    user_id = callback.from_user.id
-    
-    if "expense_amount" in data:
-        amount = data.get("expense_amount")
-        comment = data.get("expense_comment", "")
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
+async def process_confirm_amount(
+    callback: CallbackQuery, state: FSMContext, db_pool
+):
+  await callback.answer()
+  data = await state.get_data()
+  user_id = callback.from_user.id
+  lang = data.get("lang", "ua")
+
+  if "expense_amount" in data:
+    amount = data.get("expense_amount")
+    comment = data.get("expense_comment", "")
+    async with db_pool.acquire() as conn:
+      await conn.execute(
+          """
                 INSERT INTO operations (user_id, amount, is_income, comment, created_at)
                 VALUES ($1, $2, $3, $4, NOW());
-            """, user_id, amount, False, comment)
-        await callback.message.edit_text(f"Дані збережені! Витрата: {amount} грн ✅")
-        
-    elif "income_amount" in data:
-        amount = data.get("income_amount")
-        comment = data.get("income_comment", "")
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
+            """,
+          user_id,
+          amount,
+          False,
+          comment,
+      )
+
+    msg = (
+        f"Data saved! Expense: {amount} UAH ✅"
+        if lang == "en"
+        else f"Дані збережені! Витрата: {amount} грн ✅"
+    )
+    await callback.message.edit_text(msg)
+
+  elif "income_amount" in data:
+    amount = data.get("income_amount")
+    comment = data.get("income_comment", "")
+    async with db_pool.acquire() as conn:
+      await conn.execute(
+          """
                 INSERT INTO operations (user_id, amount, is_income, comment, created_at)
                 VALUES ($1, $2, $3, $4, NOW());
-            """, user_id, amount, True, comment)
-        await callback.message.edit_text(f"Дані збережені! Дохід: {amount} грн ✅")
-        
-    await state.clear()
+            """,
+          user_id,
+          amount,
+          True,
+          comment,
+      )
+
+    msg = (
+        f"Data saved! Income: {amount} UAH ✅"
+        if lang == "en"
+        else f"Дані збережені! Дохід: {amount} грн ✅"
+    )
+    await callback.message.edit_text(msg)
+
+  await state.clear()
+
 
 @dp.callback_query(FinanceForm.waiting_for_confirmation, F.data == "cancel")
 async def process_cancel_amount(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
-    await callback.message.edit_text("Дію скасовано ⚙️")
+  await callback.answer()
+  data = await state.get_data()
+  lang = data.get("lang", "ua")
+  await state.clear()
+
+  msg = (
+      "Action cancelled ⚙️"
+      if lang == "en"
+      else "Дію скасовано. Ви можете вибрати потрібну функцію в меню ⚙️"
+  )
+  await callback.message.edit_text(msg)
+
 
 async def get_db_pool():
-    return await asyncpg.create_pool(
-        dsn=DATABASE_URL,
-        min_size=1,
-        max_size=10
-    )
+  return await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=10)
+
 
 async def main():
-    db_pool = await get_db_pool()
-    dp.workflow_data["db_pool"] = db_pool
-    await dp.start_polling(bot)
+  db_pool = await get_db_pool()
+  dp.workflow_data["db_pool"] = db_pool
+  await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    try:
-        print("Бот запускається...")
-        asyncio.run(main()) # Переконайся, що тут є дужки main()
-    except Exception as e:
-        print(f"❌ ВИНИКЛА ПОМИЛКА: {e}")
-        input("\nНатисни Enter, щоб закрити...")
+  try:
+    print("Бот запускається...")
+    asyncio.run(main())
+  except Exception as e:
+    print(f"❌ ВИНИКЛА ПОМИЛКА: {e}")
