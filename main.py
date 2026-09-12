@@ -21,12 +21,23 @@ from dotenv import load_dotenv
 import asyncpg
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject
 
 evn_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=evn_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+BANNED_USERS = os.getenv("BANNED_USERS")  # замініть на потрібний ID
+
+class BlockMiddleware(BaseMiddleware):
+    async def call(self, handler, event: TelegramObject, data):
+        user = data.get("event_from_user")
+        if user and user.id in BANNED_USERS:
+            return # Бот просто мовчить і нічого не робить
+        return await handler(event, data)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -719,10 +730,14 @@ async def get_db_pool():
 
 
 async def main():
-  db_pool = await get_db_pool()
-  dp.workflow_data["db_pool"] = db_pool
-  await dp.start_polling(bot)
+    db_pool = await get_db_pool()
+    dp.workflow_data["db_pool"] = db_pool
+    
+    dp.message.outer_middleware(BlockMiddleware())
+    dp.callback_query.outer_middleware(BlockMiddleware())
 
+    asyncio.create_task(start_dummy_server())
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
   try:
