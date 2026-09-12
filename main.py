@@ -33,7 +33,7 @@ load_dotenv(dotenv_path=evn_path)
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-BANNED_USERS = [123456789, 987654321]  # Вкажи сюди реальні Telegram ID
+BANNED_USERS = [8264991600]  # Вкажи сюди реальні Telegram ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
